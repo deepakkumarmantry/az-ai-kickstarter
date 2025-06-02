@@ -119,6 +119,7 @@ var tags = union(
   {
     'azd-env-name': environmentName
     solution: 'az-ai-kickstarter'
+    nfsfileshare: 'enabled'
   },
   extraTags
 )
