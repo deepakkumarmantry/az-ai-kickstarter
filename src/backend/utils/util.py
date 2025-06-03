@@ -1,3 +1,13 @@
+"""
+Utility module for Azure AI Accelerator application.
+
+This module provides helper functions for:
+- Environment configuration
+- OpenTelemetry setup for observability (tracing, metrics, and logging)
+- Agent creation from YAML definitions
+- Workflow utilities for agent interactions
+"""
+
 from io import StringIO
 from subprocess import run, PIPE
 import os
@@ -45,6 +55,12 @@ from semantic_kernel.functions import KernelArguments
 from semantic_kernel.agents import ChatCompletionAgent
 
 def load_dotenv_from_azd():
+    """
+    Loads environment variables from Azure Developer CLI (azd) or .env file.
+    
+    Attempts to load environment variables using the azd CLI first. 
+    If that fails, falls back to loading from a .env file in the current directory.
+    """
     result = run("azd env get-values", stdout=PIPE, stderr=PIPE, shell=True, text=True)
     if result.returncode == 0:
         logging.info(f"Found AZD environment. Loading...")
@@ -61,6 +77,13 @@ local_endpoint = None
 
 
 def set_up_tracing():
+    """
+    Sets up exporters for Azure Monitor and optional local telemetry.
+    """
+    if not os.getenv("APPLICATIONINSIGHTS_CONNECTION_STRING"):
+        logging.info("APPLICATIONINSIGHTS_CONNECTION_STRING is not set skipping observability setup.")
+        return
+
     exporters = []
     exporters.append(AzureMonitorTraceExporter.from_connection_string(os.getenv("APPLICATIONINSIGHTS_CONNECTION_STRING")))
     if (local_endpoint):
@@ -73,6 +96,14 @@ def set_up_tracing():
 
 
 def set_up_metrics():
+    """
+    Configures metrics collection with OpenTelemetry.
+    Configures views to filter metrics to only those starting with "semantic_kernel".
+    """
+    if not os.getenv("APPLICATIONINSIGHTS_CONNECTION_STRING"):
+        logging.info("APPLICATIONINSIGHTS_CONNECTION_STRING is not set skipping observability setup.")
+        return
+
     exporters = []
     if (local_endpoint):
         exporters.append(OTLPMetricExporter(endpoint=local_endpoint))
@@ -93,6 +124,14 @@ def set_up_metrics():
 
 
 def set_up_logging():
+    """
+    Configures logging with OpenTelemetry.
+    Adds filters to exclude specific namespace logs for cleaner output.
+    """
+    if not os.getenv("APPLICATIONINSIGHTS_CONNECTION_STRING"):
+        logging.info("APPLICATIONINSIGHTS_CONNECTION_STRING is not set skipping observability setup.")
+        return
+
     exporters = []
     exporters.append(AzureMonitorLogExporter(connection_string=os.getenv("APPLICATIONINSIGHTS_CONNECTION_STRING")))
 
@@ -114,8 +153,11 @@ def set_up_logging():
 
     # FILTER - WHAT NOT TO LOG
     class KernelFilter(logging.Filter):
-        """A filter to not process records from semantic_kernel."""
-
+        """
+        A filter to exclude logs from specific semantic_kernel namespaces.
+        
+        Prevents excessive logging from specified module namespaces to reduce noise.
+        """
         # These are the namespaces that we want to exclude from logging for the purposes of this demo.
         namespaces_to_exclude: list[str] = [
             # "semantic_kernel.functions.kernel_plugin",
@@ -132,56 +174,53 @@ def set_up_logging():
     # handler.addFilter(logging.Filter("semantic_kernel"))
     handler.addFilter(KernelFilter())
 
-# --------------------------------------------
-# UTILITY - CREATES an agent based on YAML definition
-# --------------------------------------------
-def create_agent_from_yaml(kernel, service_id, definition_file_path, reasoning_effort=None):
-        
-        with open(definition_file_path, 'r', encoding='utf-8') as file:
-            definition = yaml.safe_load(file)
-            
-        settings = AzureChatPromptExecutionSettings(
-                temperature=definition.get('temperature', 0.5),
-                function_choice_behavior=FunctionChoiceBehavior.Auto(
-                    filters={"included_plugins": definition.get('included_plugins', [])}
-                ))
-    
-        # Resoning model specifics
-        model_id = kernel.get_service(service_id=service_id).ai_model_id
-        if model_id.lower().startswith("o"):
-            settings.temperature = None
-            settings.reasoning_effort = reasoning_effort
-            
-        agent = ChatCompletionAgent(
-            service_id=service_id,
-            kernel=kernel,
-            arguments=KernelArguments(settings=settings),
-            name=definition['name'],
-            description=definition['description'],
-            instructions=definition['instructions']
-        )
-        
-        return agent
     
 async def describe_next_action(kernel, settings, messages):
-        next_action = await kernel.invoke_prompt(
-            function_name="describe_next_action",
-            prompt=f"""
-            Provided the following chat history, what is next action in the agentic chat? 
-            
-            Provide three word summary.
-            Always indicate WHO takes the action, for example: WRITER: Writes revises draft
-            OBS! CRITIC cannot take action, only to evaluate the text and provide a score.
-            
-            IF the last entry is from CRITIC and the score is above 8 - you MUST respond with "CRITIC: Approves the text."
-            
-            AGENTS:
-            - WRITER: Writes and revises the text
-            - CRITIC: Evaluates the text and provides scroring from 1 to 10
-            
-            AGENT_CHAT: {messages}
-            
-            """,
-            settings=settings
-        )
-        return next_action
+    """
+    Determines the next action in the Cosmos DB agent conversation workflow.
+   
+    Args:
+        kernel: The Semantic Kernel instance
+        settings: Execution settings for the prompt
+        messages: Conversation history between agents
+       
+    Returns:
+        str: A brief summary of the next action, indicating which Cosmos DB specialist agent is acting
+    """
+    # Get the last message to determine which agent just spoke
+    last_message = messages[-1] if messages else {"name": "None"}
+    last_agent = last_message.get("name", "Unknown")
+   
+    next_action = await kernel.invoke_prompt(
+        function_name="describe_next_action",
+        prompt=f"""
+        Given the following conversation between Azure Cosmos DB specialist agents, describe the next action.
+       
+        Provide a brief summary (3-5 words) of what's happening next in the format: "AGENT: Action description"
+       
+        AGENTS:
+        - CosmosUseCaseFit: Evaluates if Cosmos DB fits the scenario
+        - CosmosPricing: Analyzes cost optimization
+        - CosmosDataModel: Designs optimal data structure
+        - CosmosIntegration: Plans service connections
+        - CosmosPerformanceTuning: Optimizes database performance
+        - CosmosSecurity: Implements security configurations
+        - CosmosReliability: Ensures high availability
+        - CosmosMigration: Plans data migration strategy
+        - CosmosTroubleshooting: Resolves errors and issues
+        - CosmosMonitoring: Sets up monitoring solutions
+        - CosmosAPISpecialist: Guides on API implementation
+        - Critic-Team: Evaluates completeness of solution
+       
+        If the last message is from Critic-Team with a score of 8 or higher, respond with "APPROVED: Solution complete"
+        If a complete solution has been reached, respond with "FINAL: Complete solution provided"
+       
+        Last agent to speak: {last_agent}
+       
+        CONVERSATION HISTORY: {messages[-3:] if len(messages) >= 3 else messages}
+        """,
+        settings=settings
+    )
+   
+    return next_action
+ 
